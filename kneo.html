@@ -1,0 +1,336 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Cash Drop</title>
+  <style>
+    html,body{
+      height:100%; margin:0; background:#000; overflow:hidden;
+      /* snappy touch on tablets/phones */
+      touch-action:none; -webkit-user-select:none; user-select:none;
+    }
+    #wrap{position:relative;height:100%}
+    canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;}
+    .timer{position:absolute;top:20px;right:40px;color:#00ff6a;font-family:Arial Black,sans-serif;
+           font-size:40px;user-select:none;transition:opacity .15s ease;text-shadow:0 0 12px rgba(0,255,106,.2);}
+    .moneyDisplay{position:absolute;top:80px;right:40px;color:#00ff6a;font-family:Arial Black,sans-serif;
+           font-size:48px;user-select:none;transition:opacity .15s ease;text-shadow:0 0 12px rgba(0,255,106,.2);}
+    .final{
+      position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+      font-family:Arial Black,sans-serif;font-size:96px;color:#00ff6a;
+      visibility:hidden;opacity:0;transition:opacity .15s ease;text-shadow:0 0 12px rgba(0,255,106,.25);
+    }
+    .hudHidden{opacity:0; pointer-events:none;}
+    .final.show{visibility:visible;opacity:1;}
+
+    /* TAP TO START overlay */
+    #startOverlay{
+      position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      background:#000; color:#00ff6a; font-family:Arial Black,sans-serif;
+      text-align:center; z-index:10; cursor:pointer; user-select:none;
+      /* responsive size */
+      font-size: clamp(28px, 8vw, 72px);
+      letter-spacing: 2px;
+      text-shadow:0 0 16px rgba(0,255,106,.25);
+    }
+    #hint{position:absolute; bottom:24px; width:100%; text-align:center; color:#00ff6a;
+      font-family:Arial Black,sans-serif; font-size:clamp(12px,2.5vw,18px); opacity:.7;}
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div class="timer" id="hudTimer">⏱️ <span id="timer">15</span>s</div>
+  <div class="moneyDisplay" id="hudMoney">💵 $<span id="money">0.00</span></div>
+  <div class="final" id="finalScreen"></div>
+
+  <!-- Fullscreen starter -->
+  <div id="startOverlay">
+    TAP TO START
+    <div id="hint">Tip: press F for fullscreen, R to reset after a game</div>
+  </div>
+</div>
+
+<script>
+(()=> {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  const hudTimer = document.getElementById('hudTimer');
+  const hudMoney = document.getElementById('hudMoney');
+  const moneyEl = document.getElementById('money');
+  const timerEl = document.getElementById('timer');
+  const finalScreen = document.getElementById('finalScreen');
+  const startOverlay = document.getElementById('startOverlay');
+
+  // ---- State
+  let money=0, timer=15;
+  let width=0, height=0;
+  const dpr=Math.max(1, Math.min(2, window.devicePixelRatio||1));
+  const bills=[], floats=[];
+  let gameOver=false, countdown=null, started=false, rafId=null, last=0, acc=0;
+
+  const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+
+  function resize(){
+    width=window.innerWidth; height=window.innerHeight;
+    canvas.width=Math.floor(width*dpr);
+    canvas.height=Math.floor(height*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    last = 0; // avoid spawn bursts after resizes
+  }
+  resize();
+  addEventListener('resize', resize);
+
+  function fmt(n){
+    return n.toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+  }
+
+  // ---------------- Bills ----------------
+  function makeBill(rarity='normal'){
+    if(gameOver) return;
+
+    const rightBoundary = width * 0.8;
+    const w = 60 + Math.random()*80;
+    const h = w * 0.42;
+    const spawnWidth = Math.max(1, rightBoundary - w);
+    const x = (Math.random()*spawnWidth) + w/2;
+    const y = -h;
+
+    let vy = 200 + Math.random()*180;
+    let rot = (Math.random() - .5) * 0.4;
+    let rotv = (Math.random() - .5) * 1.5;
+
+    if(rarity!=='normal'){ vy *= 0.8; rotv *= 0.6; } // easier to click rare bills
+
+    const values = {
+      normal: [0.5, 1, 2, 5],
+      blue:   [10, 15, 20],
+      gold:   [50, 75, 100],
+    };
+    const set = values[rarity] || values.normal;
+    const value = set[Math.floor(Math.random()*set.length)];
+
+    bills.push({x,y,w,h,vy,rot,rotv,rarity,value});
+  }
+
+  function drawBill(b){
+    ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(b.rot);
+
+    if(b.rarity==='gold'){
+      ctx.shadowColor='rgba(255,215,64,0.55)'; ctx.shadowBlur=18;
+      const g=ctx.createLinearGradient(-b.w/2,-b.h/2,b.w/2,b.h/2);
+      g.addColorStop(0,'#ffe082'); g.addColorStop(1,'#ffb300');
+      ctx.fillStyle=g; ctx.fillRect(-b.w/2,-b.h/2,b.w,b.h);
+      ctx.strokeStyle='#c68400'; ctx.lineWidth=5; ctx.strokeRect(-b.w/2,-b.h/2,b.w,b.h);
+      ctx.fillStyle='#6d4c41';
+    } else if(b.rarity==='blue'){
+      ctx.shadowColor='rgba(64,196,255,0.5)'; ctx.shadowBlur=14;
+      const g=ctx.createLinearGradient(-b.w/2,-b.h/2,b.w/2,b.h/2);
+      g.addColorStop(0,'#66d1ff'); g.addColorStop(1,'#0b78d1');
+      ctx.fillStyle=g; ctx.fillRect(-b.w/2,-b.h/2,b.w,b.h);
+      ctx.strokeStyle='#084c8a'; ctx.lineWidth=5; ctx.strokeRect(-b.w/2,-b.h/2,b.w,b.h);
+      ctx.fillStyle='#073b64';
+    } else {
+      const g=ctx.createLinearGradient(-b.w/2,-b.h/2,b.w/2,b.h/2);
+      g.addColorStop(0,'#00ff66'); g.addColorStop(1,'#008033');
+      ctx.fillStyle=g; ctx.fillRect(-b.w/2,-b.h/2,b.w,b.h);
+      ctx.strokeStyle='#004d00'; ctx.lineWidth=4; ctx.strokeRect(-b.w/2,-b.h/2,b.w,b.h);
+      ctx.fillStyle='#003300';
+    }
+
+    ctx.font=`${Math.max(10, b.h*0.4)}px Arial Black`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('$',0,0);
+
+    ctx.restore();
+  }
+
+  // ---------------- Update & Draw ----------------
+  function update(dt){
+    const rightBoundary = width*0.8;
+
+    // Bills
+    for(const b of bills){
+      b.y += b.vy * dt;
+      b.rot += b.rotv * dt;
+      if(b.x + b.w/2 > rightBoundary){ b.x = rightBoundary - b.w/2; }
+    }
+    for(let i=bills.length-1;i>=0;i--){
+      const b=bills[i];
+      if(b.x+b.w/2>rightBoundary || b.y-b.h/2>height){ bills.splice(i,1); }
+    }
+
+    // Floating labels
+    if(!gameOver){
+      for(let i=floats.length-1;i>=0;i--){
+        const f=floats[i];
+        f.age += dt;
+        f.y -= 40 * dt;
+        if(f.age >= f.ttl) floats.splice(i,1);
+      }
+    }
+  }
+
+  function draw(){
+    // Clear & draw right barrier (20%)
+    ctx.clearRect(0,0,width,height);
+    ctx.fillStyle='#000'; ctx.fillRect(width*0.8,0,width*0.2,height);
+    ctx.fillStyle='rgba(0,255,106,0.08)'; ctx.fillRect(width*0.8-2,0,2,height);
+
+    for(const b of bills) drawBill(b);
+
+    // Floating payouts
+    for(const f of floats){
+      const alpha=Math.max(0, 1 - (f.age/f.ttl));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = f.color;
+      ctx.strokeStyle = f.stroke;
+      ctx.lineWidth = 3;
+      ctx.font = 'bold 28px Arial Black, sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.strokeText(f.text, f.x, f.y);
+      ctx.fillText(f.text, f.x, f.y);
+      ctx.restore();
+    }
+  }
+
+  // ---------------- Input ----------------
+  function hitBill(b, x, y){
+    const dx = x - b.x;
+    const dy = y - b.y;
+    const cos = Math.cos(-b.rot);
+    const sin = Math.sin(-b.rot);
+    const lx = dx * cos - dy * sin;
+    const ly = dx * sin + dy * cos;
+
+    // generous touch padding (tablets/phones), tighter on mouse
+    const padFactor = isTouch ? 0.25 : 0.2;
+    const padW = b.w * padFactor;
+    const padH = b.h * padFactor;
+
+    return (lx >= -(b.w/2+padW) && lx <= (b.w/2+padW) &&
+            ly >= -(b.h/2+padH) && ly <= (b.h/2+padH));
+  }
+
+  canvas.addEventListener('pointerdown', (e)=>{
+    if(gameOver) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    for(let i=bills.length-1;i>=0;i--){
+      const b=bills[i];
+      if(hitBill(b,x,y)){
+        bills.splice(i,1);
+        money += b.value; moneyEl.textContent = fmt(money);
+
+        let color='#00ff6a', stroke='rgba(0,255,106,0.35)', tag='';
+        if(b.rarity==='blue'){ color='#66d1ff'; stroke='rgba(102,209,255,0.35)'; tag=' ★'; }
+        if(b.rarity==='gold'){ color='#ffd54a'; stroke='rgba(255,213,74,0.45)'; tag=' ★ JACKPOT!'; }
+
+        floats.push({x:b.x, y:b.y, text:`+$${fmt(b.value)}${tag}`, age:0, ttl:1.0, color, stroke});
+
+        if(!started){ started=true; startCountdown(); }
+        break;
+      }
+    }
+  }, { passive:true });
+
+  // Keyboard helpers
+  addEventListener('keydown', (e)=>{
+    const k=e.key.toLowerCase();
+    if(k==='f'){
+      if(!document.fullscreenElement){ document.documentElement.requestFullscreen().catch(()=>{}); }
+      else { document.exitFullscreen().catch(()=>{}); }
+    }
+    if(k==='r' && gameOver){ resetGame(); }
+  });
+
+  // ---------------- Round control ----------------
+  function startCountdown(){
+    clearInterval(countdown);
+    timerEl.textContent = String(timer);
+    countdown = setInterval(()=>{
+      if(gameOver){ clearInterval(countdown); return; }
+      if(timer>0){ timer--; timerEl.textContent = String(timer); }
+      if(timer<=0 && !gameOver){ endGame(); }
+    },1000);
+  }
+
+  function endGame(){
+    gameOver = true;
+    clearInterval(countdown); countdown=null;
+
+    // Clean visuals
+    bills.length=0; floats.length=0;
+    hudTimer.classList.add('hudHidden');
+    hudMoney.classList.add('hudHidden');
+
+    draw();
+    finalScreen.textContent = `YOU WON $${fmt(money)}!`;
+    finalScreen.classList.add('show');
+
+    if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
+  }
+
+  function resetGame(){
+    clearInterval(countdown); countdown=null;
+    if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
+
+    gameOver=false; started=false; last=0; acc=0;
+    money=0; timer=15; bills.length=0; floats.length=0;
+
+    moneyEl.textContent='0.00'; timerEl.textContent='15';
+    hudTimer.classList.remove('hudHidden');
+    hudMoney.classList.remove('hudHidden');
+    finalScreen.classList.remove('show');
+    finalScreen.style.visibility='hidden';
+
+    // Pre-spawn: 1 gold + 5 blue
+    makeBill('gold');
+    for(let i=0;i<5;i++) makeBill('blue');
+
+    rafId=requestAnimationFrame(loop);
+  }
+
+  document.addEventListener('visibilitychange', ()=>{ if(document.hidden){ last = 0; } });
+
+  function loop(t){
+    if(gameOver) return;
+    if(!last) last=t;
+    const dt=Math.min(0.05,(t-last)/1000);
+    last=t; acc+=dt;
+
+    // steady spawn rate (you can tweak this)
+    if(acc > 0.08){ acc = 0; makeBill('normal'); }
+
+    update(dt); draw();
+    rafId=requestAnimationFrame(loop);
+  }
+
+  // ---------------- Fullscreen start overlay ----------------
+  startOverlay.addEventListener('pointerdown', async ()=>{
+    // try fullscreen on user gesture (Android/Windows/most iPadOS 17+)
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch(e){ /* non-fatal on iPad <17 */ }
+    startOverlay.style.display='none';
+
+    // kick off normal run (pre-spawn specials)
+    makeBill('gold');
+    for(let i=0;i<5;i++) makeBill('blue');
+    if(!rafId) rafId=requestAnimationFrame(loop);
+  }, { passive:true });
+
+  // If someone loads it with the overlay hidden (dev), keep a safe start path:
+  // (No auto-start here—overlay tap is the official entry point.)
+})();
+</script>
+</body>
+</html>
